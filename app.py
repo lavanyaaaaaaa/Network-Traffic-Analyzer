@@ -1,67 +1,52 @@
-try:
-    from flask import Flask, render_template, jsonify, request
-    from threading import Thread
-    from analyzer import TrafficAnalyzer
-    import logging
-except ImportError as e:
-    print(f"Import error: {e}")
-    print("Please make sure you've installed all requirements:")
-    print("pip install -r requirements.txt")
-    exit(1)
-
-# Configure logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+from flask import Flask, render_template, request, jsonify
+from scapy.all import sniff, get_if_list
+import threading
 
 app = Flask(__name__)
-analyzer = TrafficAnalyzer()
+capture_thread = None
+capturing = False
+packet_data = []
+
+def capture_packets(interface):
+    global capturing, packet_data
+    packet_data.clear()
+
+    def process_packet(packet):
+        if capturing:
+            packet_info = {
+                "src": packet[0][1].src if packet.haslayer(1) else "N/A",
+                "dst": packet[0][1].dst if packet.haslayer(1) else "N/A",
+                "proto": packet.name
+            }
+            packet_data.append(packet_info)
+
+    sniff(iface=interface, prn=process_packet, store=False)
 
 @app.route('/')
-def dashboard():
-    return render_template('dashboard.html')
+def index():
+    interfaces = get_if_list()
+    preferred = [i for i in interfaces if "Wi-Fi" in i or "Ethernet" in i]
+    default_iface = preferred[0] if preferred else interfaces[0]
+    return render_template('index.html', interfaces=interfaces, default_iface=default_iface)
 
-@app.route('/start_capture')
+@app.route('/start', methods=['POST'])
 def start_capture():
-    interface = request.args.get('interface', None)
-    if not analyzer.is_running:
-        try:
-            Thread(target=analyzer.start_capture, kwargs={'interface': interface}).start()
-            logger.info(f"Capture started on interface: {interface}")
-            return jsonify({'status': 'capture started'})
-        except Exception as e:
-            logger.error(f"Failed to start capture: {str(e)}")
-            return jsonify({'status': 'error', 'message': str(e)}), 500
+    global capturing, capture_thread
+    interface = request.json.get('interface')
+    capturing = True
+    capture_thread = threading.Thread(target=capture_packets, args=(interface,))
+    capture_thread.start()
+    return jsonify({"status": "started"})
 
-@app.route('/stop_capture')
+@app.route('/stop', methods=['POST'])
 def stop_capture():
-    try:
-        analyzer.stop_capture()
-        logger.info("Capture stopped")
-        return jsonify({'status': 'capture stopped'})
-    except Exception as e:
-        logger.error(f"Failed to stop capture: {str(e)}")
-        return jsonify({'status': 'error', 'message': str(e)}), 500
+    global capturing
+    capturing = False
+    return jsonify({"status": "stopped"})
 
-@app.route('/get_stats')
-def get_stats():
-    try:
-        stats = analyzer.get_stats()
-        return jsonify(stats)
-    except Exception as e:
-        logger.error(f"Failed to get stats: {str(e)}")
-        return jsonify({'status': 'error', 'message': str(e)}), 500
-
-@app.route('/interfaces')
-def get_interfaces():
-    try:
-        from scapy.all import get_if_list
-        return jsonify({'interfaces': get_if_list()})
-    except Exception as e:
-        logger.error(f"Failed to get interfaces: {str(e)}")
-        return jsonify({'status': 'error', 'message': str(e)}), 500
+@app.route('/data')
+def get_data():
+    return jsonify(packet_data)
 
 if __name__ == '__main__':
-    try:
-        app.run(host='0.0.0.0', port=5000, debug=True)
-    except Exception as e:
-        logger.error(f"Application failed to start: {str(e)}")
+    app.run(debug=True)

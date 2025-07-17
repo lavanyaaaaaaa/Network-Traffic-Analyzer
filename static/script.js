@@ -1,195 +1,101 @@
-// Global variables
-let protocolChart;
-let updateInterval;
-const MAX_ALERTS = 20;
-const UPDATE_INTERVAL = 2000; // 2 seconds
-
-// DOM elements
-const startBtn = document.getElementById('startBtn');
-const stopBtn = document.getElementById('stopBtn');
-const statusEl = document.getElementById('status');
-const interfaceSelect = document.getElementById('interfaceSelect');
-const totalPacketsEl = document.getElementById('totalPackets');
-const packetsPerSecEl = document.getElementById('packetsPerSec');
-const talkersTable = document.getElementById('talkersTable').querySelector('tbody');
-const alertsContainer = document.getElementById('alertsContainer');
-
-// Initialize the application
-document.addEventListener('DOMContentLoaded', () => {
-    // Load available network interfaces
-    fetch('/interfaces')
-        .then(response => response.json())
-        .then(data => {
-            data.interfaces.forEach(iface => {
-                const option = document.createElement('option');
-                option.value = iface;
-                option.textContent = iface;
-                interfaceSelect.appendChild(option);
-            });
-        })
-        .catch(error => {
-            console.error('Error loading interfaces:', error);
-        });
-
-    // Set up event listeners
-    startBtn.addEventListener('click', startCapture);
-    stopBtn.addEventListener('click', stopCapture);
-});
+let packets = [];
+let paused = false;
+let chart;
+let captureInterval = null;
 
 function startCapture() {
-    const interface = interfaceSelect.value;
-    
-    fetch(`/start_capture?interface=${encodeURIComponent(interface)}`)
-        .then(response => {
-            if (!response.ok) throw new Error('Failed to start capture');
-            return response.json();
-        })
-        .then(data => {
-            statusEl.textContent = 'Status: Running';
-            statusEl.className = 'status running';
-            startBtn.disabled = true;
-            stopBtn.disabled = false;
-            interfaceSelect.disabled = true;
-            
-            // Start updating stats
-            updateStats();
-            updateInterval = setInterval(updateStats, UPDATE_INTERVAL);
-        })
-        .catch(error => {
-            console.error('Error starting capture:', error);
-            statusEl.textContent = 'Status: Error - see console';
-            statusEl.className = 'status error';
-        });
+    paused = false;
+    if (!captureInterval) {
+        simulatePacketFlow();
+    }
+}
+
+function pauseCapture() {
+    paused = true;
+}
+
+function resumeCapture() {
+    paused = false;
 }
 
 function stopCapture() {
-    fetch('/stop_capture')
-        .then(response => {
-            if (!response.ok) throw new Error('Failed to stop capture');
-            return response.json();
-        })
-        .then(data => {
-            clearInterval(updateInterval);
-            statusEl.textContent = 'Status: Stopped';
-            statusEl.className = 'status stopped';
-            startBtn.disabled = false;
-            stopBtn.disabled = true;
-            interfaceSelect.disabled = false;
-        })
-        .catch(error => {
-            console.error('Error stopping capture:', error);
-            statusEl.textContent = 'Status: Error - see console';
-            statusEl.className = 'status error';
-        });
+    paused = true;
+    clearInterval(captureInterval);
+    captureInterval = null;
+    packets = [];
+    updateTable();
+    updateChart();
 }
 
-function updateStats() {
-    fetch('/get_stats')
-        .then(response => {
-            if (!response.ok) throw new Error('Network response was not ok');
-            return response.json();
-        })
-        .then(data => {
-            // Update basic stats
-            totalPacketsEl.textContent = data.total_packets.toLocaleString();
-            packetsPerSecEl.textContent = data.packets_per_sec.toFixed(2);
-            
-            // Update protocol chart
-            updateProtocolChart(data.protocols);
-            
-            // Update top talkers table
-            updateTopTalkers(data.top_talkers);
-            
-            // Update alerts
-            updateAlerts(data.alerts);
-        })
-        .catch(error => {
-            console.error('Error fetching stats:', error);
-            statusEl.textContent = 'Status: Error - see console';
-            statusEl.className = 'status error';
-        });
+function clearData() {
+    packets = [];
+    updateTable();
+    updateChart();
 }
 
-function updateProtocolChart(protocolData) {
-    const ctx = document.getElementById('protocolChart').getContext('2d');
-    const labels = Object.keys(protocolData);
-    const data = Object.values(protocolData);
-    
-    if (protocolChart) {
-        protocolChart.data.labels = labels;
-        protocolChart.data.datasets[0].data = data;
-        protocolChart.update();
-    } else {
-        protocolChart = new Chart(ctx, {
-            type: 'doughnut',
-            data: {
-                labels: labels,
-                datasets: [{
-                    data: data,
-                    backgroundColor: [
-                        '#FF6384', // TCP
-                        '#36A2EB', // UDP
-                        '#FFCE56', // ICMP
-                        '#4BC0C0', // Other
-                        '#9966FF'
-                    ],
-                    borderWidth: 1
-                }]
-            },
-            options: {
-                responsive: true,
-                maintainAspectRatio: false,
-                plugins: {
-                    legend: {
-                        position: 'right'
-                    }
-                }
-            }
-        });
+function toggleTheme() {
+    document.body.classList.toggle('dark-mode');
+    const isDark = document.body.classList.contains('dark-mode');
+    localStorage.setItem('theme', isDark ? 'dark' : 'light');
+    document.getElementById('themeToggle').innerText = isDark ? 'Light Mode' : 'Dark Mode';
+}
+
+function loadTheme() {
+    const saved = localStorage.getItem('theme');
+    if (saved === 'dark') {
+        document.body.classList.add('dark-mode');
+        document.getElementById('themeToggle').innerText = 'Light Mode';
     }
 }
 
-function updateTopTalkers(talkersData) {
-    // Sort by packet count (descending)
-    const sortedTalkers = Object.entries(talkersData)
-        .sort((a, b) => b[1] - a[1])
-        .slice(0, 10); // Show top 10
-    
-    talkersTable.innerHTML = '';
-    
-    sortedTalkers.forEach(([ip, count]) => {
-        const row = document.createElement('tr');
-        
-        const ipCell = document.createElement('td');
-        ipCell.textContent = ip;
-        
-        const countCell = document.createElement('td');
-        countCell.textContent = count.toLocaleString();
-        
-        row.appendChild(ipCell);
-        row.appendChild(countCell);
-        talkersTable.appendChild(row);
+function exportCSV() {
+    if (!packets.length) return;
+    const rows = [['#', 'Source', 'Destination', 'Protocol'], ...packets.map((p, i) => [i+1, p.src, p.dst, p.proto])];
+    const csvContent = rows.map(e => e.join(",")).join("\n");
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+    const link = document.createElement("a");
+    link.href = URL.createObjectURL(blob);
+    link.download = "packets.csv";
+    link.click();
+}
+
+function updateTable() {
+    const table = document.getElementById("packetTable");
+    table.innerHTML = "";
+    packets.forEach((p, i) => {
+        const row = `<tr><td>${i+1}</td><td>${p.src}</td><td>${p.dst}</td><td>${p.proto}</td></tr>`;
+        table.innerHTML += row;
     });
 }
 
-function updateAlerts(alerts) {
-    // Limit number of displayed alerts
-    const recentAlerts = alerts.slice(-MAX_ALERTS).reverse();
-    
-    alertsContainer.innerHTML = '';
-    
-    if (recentAlerts.length === 0) {
-        const noAlerts = document.createElement('div');
-        noAlerts.className = 'alert info';
-        noAlerts.textContent = 'No security alerts detected';
-        alertsContainer.appendChild(noAlerts);
-        return;
-    }
-    
-    recentAlerts.forEach(alert => {
-        const alertEl = document.createElement('div');
-        alertEl.className = 'alert warning';
-        alertEl.textContent = alert;
-        alertsContainer.appendChild(alertEl);
+function updateChart() {
+    const counts = {};
+    packets.forEach(p => counts[p.proto] = (counts[p.proto] || 0) + 1);
+    const data = {
+        labels: Object.keys(counts),
+        datasets: [{
+            label: 'Protocol Count',
+            data: Object.values(counts),
+            backgroundColor: ['#0d6efd', '#198754', '#ffc107', '#dc3545']
+        }]
+    };
+    if (chart) chart.destroy();
+    chart = new Chart(document.getElementById('protocolChart'), {
+        type: 'bar',
+        data: data
     });
 }
+
+function simulatePacketFlow() {
+    captureInterval = setInterval(() => {
+        if (paused) return;
+        const proto = ['TCP', 'UDP', 'ICMP'][Math.floor(Math.random()*3)];
+        packets.push({ src: '192.168.1.' + Math.floor(Math.random()*255), dst: '10.0.0.' + Math.floor(Math.random()*255), proto });
+        updateTable();
+        updateChart();
+    }, 1000);
+}
+
+window.onload = () => {
+    loadTheme();
+};
